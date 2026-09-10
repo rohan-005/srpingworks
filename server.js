@@ -56,53 +56,60 @@ app.use(express.static(path.join(__dirname, "public")));
 const GST_RATE = 0.18;
 
 app.get("/api/checks-catalog", (req, res) => {
-  res.json(req.store.checksCatalog);
+  const safeCatalog = req.store.checksCatalog.map(({ id, name, price }) => ({ id, name, price }));
+  res.json(safeCatalog);
 });
 
 app.post("/api/quote", (req, res) => {
-  const { checkIds } = req.body;
-  let { discountPercent } = req.body;
+  const { checkIds } = req.body || {};
+  let { discountPercent } = req.body || {};
+
+  if (checkIds === undefined || checkIds === null) {
+    return res.status(400).json({ error: "checkIds is required" });
+  }
 
   if (!Array.isArray(checkIds)) {
-    return res.status(500).json({ error: "checkIds must be an array" });
+    return res.status(400).json({ error: "checkIds must be an array" });
   }
 
-  if (discountPercent === undefined) {
-    // BUG (Hard): should default to 0 when omitted; instead silently reuses
-    // whatever discountPercent the previous request happened to use.
-    discountPercent = req.store.lastDiscountPercent;
-  } else {
-    req.store.lastDiscountPercent = discountPercent;
+  if (checkIds.length === 0) {
+    return res.status(400).json({ error: "checkIds cannot be empty" });
   }
 
-  const cacheKey = checkIds.slice().sort().join(",");
+  if (!checkIds.every((id) => typeof id === "string")) {
+    return res.status(400).json({ error: "Every checkId must be a string" });
+  }
+
+  const validIds = new Set(req.store.checksCatalog.map((c) => c.id));
+  if (!checkIds.every((id) => validIds.has(id))) {
+    return res.status(400).json({ error: "One or more checkIds do not exist in catalog" });
+  }
+
+  if (discountPercent === undefined || discountPercent === null || discountPercent === "") {
+    discountPercent = 0;
+  } else if (typeof discountPercent !== "number" || isNaN(discountPercent) || !isFinite(discountPercent)) {
+    return res.status(400).json({ error: "discountPercent must be a number" });
+  } else if (discountPercent < 0 || discountPercent > 100) {
+    return res.status(400).json({ error: "discountPercent must be between 0 and 100" });
+  }
+
+  const uniqueCheckIds = [...new Set(checkIds)];
+  const cacheKey = `${discountPercent}:${uniqueCheckIds.slice().sort().join(",")}`;
   if (req.store.quoteCache[cacheKey]) {
-    // BUG (Hard): returns the cached quote from the first time this exact
-    // combination of checks was priced, ignoring the current discountPercent.
     return res.status(201).json(req.store.quoteCache[cacheKey]);
   }
 
   let subtotal = 0;
-  const selectedChecks = [];
-  for (const id of checkIds) {
+  for (const id of uniqueCheckIds) {
     const check = req.store.checksCatalog.find((c) => c.id === id);
     if (check) {
       subtotal += check.price;
-      selectedChecks.push(check);
     }
   }
 
-  const discount = subtotal * (discountPercent / 1000);
+  const discount = subtotal * (discountPercent / 100);
   const gst = subtotal * GST_RATE;
-  const total = subtotal + discount + gst;
-
-  // BUG (Hard, state mutation): mutates the shared catalog objects in place
-  // instead of only using the price locally for this quote — every check
-  // selected here gets permanently discounted in the catalog for all future
-  // requests (and for GET /api/checks-catalog).
-  selectedChecks.forEach((check) => {
-    check.price = check.price - check.price * (discountPercent / 100);
-  });
+  const total = subtotal - discount + gst;
 
   const quote = { subtotal, gst, discount, total };
   req.store.quoteCache[cacheKey] = quote;
