@@ -1,3 +1,5 @@
 /my-bug-report.md
 
 /node_modules
+/test-results
+/playwright-report
