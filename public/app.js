@@ -1,6 +1,10 @@
 let catalog = [];
 let liveSubtotal = 0;
 
+function formatCurrency(val) {
+  return `₹${Number(val || 0).toFixed(2)}`;
+}
+
 async function loadCatalog() {
   const res = await fetch("/api/checks-catalog");
   catalog = await res.json();
@@ -12,46 +16,67 @@ async function loadCatalog() {
     row.innerHTML = `
       <input type="checkbox" id="check-${check.id}" value="${check.id}" data-price="${check.price}" />
       <label for="check-${check.id}">${check.name}</label>
-      <span>${check.price}</span>
+      <span>${formatCurrency(check.price)}</span>
     `;
     list.appendChild(row);
   });
   list.querySelectorAll("input[type=checkbox]").forEach((cb) => {
     cb.addEventListener("change", onCheckToggle);
   });
+  updateLiveSubtotal();
 }
 
-function onCheckToggle(e) {
-  // BUG (UI): only adds to the live preview, never subtracts on uncheck
-  if (e.target.checked) {
-    liveSubtotal += Number(e.target.dataset.price);
-  }
-  document.getElementById("live-subtotal").textContent = `₹${liveSubtotal}`;
+function updateLiveSubtotal() {
+  liveSubtotal = Array.from(document.querySelectorAll("input[type=checkbox]:checked")).reduce(
+    (sum, cb) => sum + Number(cb.dataset.price),
+    0
+  );
+  document.getElementById("live-subtotal").textContent = formatCurrency(liveSubtotal);
+}
+
+function onCheckToggle() {
+  updateLiveSubtotal();
 }
 
 function getSelectedCheckIds() {
   return Array.from(document.querySelectorAll("input[type=checkbox]:checked")).map(
-    (cb) => cb.id
+    (cb) => cb.value
   );
 }
 
-// BUG (UI, Hard): only re-validates the discount field the FIRST time it
-// changes. After one edit has been checked, `discountValidated` latches true
-// and every later edit (e.g. changing a valid 10 to an invalid 150) is never
-// re-checked, so the visible error only ever appears on the very first try.
-let discountValidated = false;
-document.getElementById("discount-input").addEventListener("change", () => {
-  if (discountValidated) return;
-  const val = Number(document.getElementById("discount-input").value);
+function validateDiscountInput() {
+  const rawVal = document.getElementById("discount-input").value.trim();
   const errorEl = document.getElementById("discount-error");
-  errorEl.textContent = val < 0 || val > 100 ? "Discount must be between 0 and 100." : "";
-  discountValidated = true;
-});
+  if (rawVal === "") {
+    errorEl.textContent = "";
+    return true;
+  }
+  const val = Number(rawVal);
+  if (isNaN(val) || val < 0 || val > 100) {
+    errorEl.textContent = "Discount must be between 0 and 100.";
+    return false;
+  }
+  errorEl.textContent = "";
+  return true;
+}
+
+document.getElementById("discount-input").addEventListener("input", validateDiscountInput);
+document.getElementById("discount-input").addEventListener("change", validateDiscountInput);
 
 async function getQuote() {
-  const checkIds = getSelectedCheckIds();
-  const discountPercent = Number(document.getElementById("discount-input").value) || 0;
   const messageEl = document.getElementById("message");
+  const isValidDiscount = validateDiscountInput();
+
+  const rawDiscount = document.getElementById("discount-input").value.trim();
+  const discountVal = Number(rawDiscount);
+  if (!isValidDiscount || (rawDiscount !== "" && (isNaN(discountVal) || discountVal < 0 || discountVal > 100))) {
+    messageEl.textContent = "Discount must be between 0 and 100.";
+    messageEl.className = "message error";
+    return;
+  }
+
+  const checkIds = getSelectedCheckIds();
+  const discountPercent = rawDiscount === "" ? 0 : discountVal;
 
   try {
     const res = await fetch("/api/quote", {
@@ -61,18 +86,22 @@ async function getQuote() {
     });
     const data = await res.json();
 
-    document.getElementById("result-subtotal").textContent = data.subtotal;
-    document.getElementById("result-discount").textContent = data.discount;
-    document.getElementById("result-gst").textContent = data.gst;
-    // BUG (UI): displays the client-side live subtotal instead of the server's total
-    document.getElementById("result-total").textContent = liveSubtotal;
+    if (!res.ok) {
+      messageEl.textContent = data.error || "Failed to generate quote.";
+      messageEl.className = "message error";
+      return;
+    }
 
-    // BUG (UI): success message shown unconditionally, even on non-2xx responses
+    document.getElementById("result-subtotal").textContent = formatCurrency(data.subtotal);
+    document.getElementById("result-discount").textContent = formatCurrency(data.discount);
+    document.getElementById("result-gst").textContent = formatCurrency(data.gst);
+    document.getElementById("result-total").textContent = formatCurrency(data.total);
+
     messageEl.textContent = "Quote generated successfully!";
     messageEl.className = "message success";
   } catch (err) {
-    messageEl.textContent = "Quote generated successfully!";
-    messageEl.className = "message success";
+    messageEl.textContent = "An error occurred while generating the quote.";
+    messageEl.className = "message error";
   }
 }
 
@@ -100,7 +129,6 @@ function showToast(msg) {
 document.getElementById("reset-btn").addEventListener("click", async () => {
   await fetch("/api/reset", { method: "POST" });
   liveSubtotal = 0;
-  discountValidated = false;
   document.getElementById("discount-input").value = "";
   document.getElementById("discount-error").textContent = "";
   document.getElementById("live-subtotal").textContent = "₹0.00";
